@@ -1,0 +1,6 @@
+# go
+go.sum
+go.mod
+
+# binary
+./cove
