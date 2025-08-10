@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/timer"
 	"github.com/charmbracelet/bubbletea"
@@ -17,36 +16,6 @@ import (
 type fileChangedMsg struct{}
 type checkFileMsg struct{}
 
-// ===== TODO LIST ITEM =====
-
-type todoItem struct {
-	todo *Todo
-}
-
-func (i todoItem) FilterValue() string { return i.todo.Description }
-
-func (i todoItem) Title() string { 
-	var checkbox string
-	switch i.todo.State {
-	case Done:
-		checkbox = "[x]"
-	default:
-		if i.todo.TimeSpent > 0 {
-			checkbox = "[*]"  // In progress
-		} else {
-			checkbox = "[ ]"  // Not started
-		}
-	}
-	
-	return fmt.Sprintf("%s %s", checkbox, i.todo.Description)
-}
-
-func (i todoItem) Description() string {
-	if i.todo.TimeSpent > 0 {
-		return fmt.Sprintf("spent: %v", i.todo.TimeSpent.Round(time.Minute))
-	}
-	return ""
-}
 
 // Helper function to sort todos (completed items last)
 func sortTodos(todos []Todo) []Todo {
@@ -73,57 +42,25 @@ func sortTodos(todos []Todo) []Todo {
 	return result
 }
 
-// ===== TODO SELECTOR WITH BUBBLES LIST =====
+// ===== TODO SELECTOR =====
 
 type TodoSelectorModel struct {
-	list         list.Model
 	todos        []Todo
 	filename     string
 	lastModified time.Time
 	spinner      spinner.Model
 	loading      bool
+	cursor       int
 }
 
 func NewTodoSelector(todos []Todo, filename string) TodoSelectorModel {
 	// Sort todos (completed items last)
 	sortedTodos := sortTodos(todos)
 	
-	// Convert todos to list items
-	items := make([]list.Item, len(sortedTodos))
-	for i := range sortedTodos {
-		items[i] = todoItem{todo: &sortedTodos[i]}
-	}
-	
-	// Create list with default delegate
-	delegate := list.NewDefaultDelegate()
-	
-	// Customize the delegate styles
-	purple := lipgloss.Color("#7D56F4")
-	green := lipgloss.Color("#01BE85")
-	
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-		Foreground(green).
-		BorderLeftForeground(green)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
-		Foreground(green)
-		
-	l := list.New(items, delegate, 80, 20)
-	l.Title = "📝 TODO Selector"
-	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(false) // Keep it simple for now
-	l.SetShowHelp(true)
-	
-	// Style the title
-	l.Styles.Title = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#FAFAFA")).
-		Background(purple).
-		Padding(0, 1)
-	
 	// Create spinner
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(purple)
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4"))
 	
 	// Get initial file modification time
 	modTime := time.Time{}
@@ -132,12 +69,12 @@ func NewTodoSelector(todos []Todo, filename string) TodoSelectorModel {
 	}
 	
 	return TodoSelectorModel{
-		list:         l,
 		todos:        sortedTodos,
 		filename:     filename,
 		lastModified: modTime,
 		spinner:      s,
 		loading:      false,
+		cursor:       0,
 	}
 }
 
@@ -158,17 +95,21 @@ func (m TodoSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.list.SetWidth(msg.Width)
-		return m, nil
-		
 	case tea.KeyMsg:
 		switch keypress := msg.String(); keypress {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.todos)-1 {
+				m.cursor++
+			}
 		case "enter":
-			if selectedItem, ok := m.list.SelectedItem().(todoItem); ok {
-				timerModel := NewBubblesTimer(selectedItem.todo, m)
+			if m.cursor < len(m.todos) {
+				timerModel := NewBubblesTimer(&m.todos[m.cursor], m, m.cursor)
 				return timerModel, timerModel.Init()
 			}
 		}
@@ -195,12 +136,13 @@ func (m TodoSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			sortedTodos := sortTodos(reconciledTodos)
 			m.todos = sortedTodos
 			
-			// Update list items
-			items := make([]list.Item, len(sortedTodos))
-			for i := range sortedTodos {
-				items[i] = todoItem{todo: &sortedTodos[i]}
+			// Keep cursor within bounds
+			if m.cursor >= len(m.todos) {
+				m.cursor = len(m.todos) - 1
 			}
-			m.list.SetItems(items)
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
 		}
 		return m, m.checkFile()
 		
@@ -210,10 +152,6 @@ func (m TodoSelectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 	
-	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	cmds = append(cmds, cmd)
-	
 	return m, tea.Batch(cmds...)
 }
 
@@ -222,7 +160,70 @@ func (m TodoSelectorModel) View() string {
 		return fmt.Sprintf("\n   %s Loading todos...\n\n", m.spinner.View())
 	}
 	
-	return "\n" + m.list.View()
+	var s strings.Builder
+	
+	// Title
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#FAFAFA")).
+		Background(lipgloss.Color("#7D56F4")).
+		Padding(0, 1)
+	
+	s.WriteString(titleStyle.Render("📝 TODO Selector"))
+	s.WriteString("\n\n")
+	
+	// Show todos in markdown style
+	for i, todo := range m.todos {
+		var checkbox string
+		switch todo.State {
+		case Done:
+			checkbox = "[x]"
+		default:
+			if todo.TimeSpent > 0 {
+				checkbox = "[*]"
+			} else {
+				checkbox = "[ ]"
+			}
+		}
+		
+		// Create the todo line
+		todoLine := fmt.Sprintf("- %s %s", checkbox, todo.Description)
+		
+		// Style for cursor selection
+		if i == m.cursor {
+			selectedStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#01BE85")).
+				Bold(true)
+			s.WriteString("> " + selectedStyle.Render(todoLine))
+		} else {
+			s.WriteString("  " + todoLine)
+		}
+		
+		s.WriteString("\n")
+		
+		// Add time info on next line if available
+		if todo.TimeSpent > 0 {
+			timeInfo := fmt.Sprintf("    spent: %v", todo.TimeSpent.Round(time.Minute))
+			if i == m.cursor {
+				selectedStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#01BE85"))
+				s.WriteString("  " + selectedStyle.Render(timeInfo))
+			} else {
+				timeStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#888888"))
+				s.WriteString("  " + timeStyle.Render(timeInfo))
+			}
+			s.WriteString("\n")
+		}
+	}
+	
+	// Help text
+	s.WriteString("\n")
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#555555"))
+	s.WriteString(helpStyle.Render("↑/↓ or j/k: navigate • enter: start timer • q: quit"))
+	
+	return s.String()
 }
 
 // ===== TIMER WITH BUBBLES TIMER =====
@@ -232,9 +233,10 @@ type TimerModel struct {
 	parentModel TodoSelectorModel
 	timer       timer.Model
 	startTime   time.Time
+	todoIndex   int
 }
 
-func NewBubblesTimer(todo *Todo, parent TodoSelectorModel) TimerModel {
+func NewBubblesTimer(todo *Todo, parent TodoSelectorModel, todoIndex int) TimerModel {
 	t := timer.NewWithInterval(todo.EstimatedTime, time.Second)
 	
 	return TimerModel{
@@ -242,6 +244,7 @@ func NewBubblesTimer(todo *Todo, parent TodoSelectorModel) TimerModel {
 		parentModel: parent,
 		timer:       t,
 		startTime:   time.Now(),
+		todoIndex:   todoIndex,
 	}
 }
 
@@ -262,10 +265,10 @@ func (m TimerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.timer.Start()
 			}
 		case "h":
-			// Calculate elapsed time using the timer's remaining time
-			elapsed := m.todo.EstimatedTime - m.timer.Timeout
-			if elapsed > 0 {
-				m.todo.AddTime(elapsed)
+			// Calculate elapsed time since timer started
+			elapsed := time.Since(m.startTime)
+			if elapsed > 0 && m.todoIndex < len(m.parentModel.todos) {
+				m.parentModel.todos[m.todoIndex].AddTime(elapsed)
 			}
 			
 			// Write updated todos back to file
@@ -275,12 +278,12 @@ func (m TimerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			
 			return m.parentModel, m.parentModel.checkFile()
 		case "d":
-			// Calculate elapsed time using the timer's remaining time
-			elapsed := m.todo.EstimatedTime - m.timer.Timeout
-			if elapsed > 0 {
-				m.todo.AddTime(elapsed)
+			// Calculate elapsed time since timer started
+			elapsed := time.Since(m.startTime)
+			if elapsed > 0 && m.todoIndex < len(m.parentModel.todos) {
+				m.parentModel.todos[m.todoIndex].AddTime(elapsed)
+				m.parentModel.todos[m.todoIndex].MarkDone()
 			}
-			m.todo.MarkDone()
 			
 			// Write updated todos back to file
 			if err := WriteTodos(m.parentModel.filename, m.parentModel.todos); err != nil {
@@ -358,35 +361,55 @@ func (m TimerModel) View() string {
 		// Parse the timer to get minutes and seconds
 		timerText := m.timer.View()
 		
-		// Add highlighting to minutes if we can parse the timer format
+		// Define styles for enhanced timer display
+		minutesStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FAFAFA")).
+			Background(lipgloss.Color("#F25D94")).
+			Padding(0, 1)
+		
+		secondsStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FAFAFA"))
+		
+		colonStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#888888"))
+		
+		// Try to parse different timer formats
+		var minutes, seconds string
+		parsed := false
+		
+		// Format 1: "9:30" or "09:30"
 		if strings.Contains(timerText, ":") {
 			parts := strings.Split(timerText, ":")
 			if len(parts) == 2 {
-				minutesStyle := lipgloss.NewStyle().
-					Bold(true).
-					Foreground(lipgloss.Color("#FAFAFA")).
-					Background(lipgloss.Color("#F25D94")).
-					Padding(0, 1)
-				
-				secondsStyle := lipgloss.NewStyle().
-					Bold(true).
-					Foreground(lipgloss.Color("#FAFAFA"))
-				
-				colonStyle := lipgloss.NewStyle().
-					Bold(true).
-					Foreground(lipgloss.Color("#888888"))
-				
-				timerDisplay := minutesStyle.Render(parts[0]) + "  " + colonStyle.Render(":") + "  " + secondsStyle.Render(parts[1])
-				s.WriteString(timerDisplay)
-			} else {
-				// Fallback to regular timer display
-				timerStyle := lipgloss.NewStyle().
-					Bold(true).
-					Foreground(lipgloss.Color("#FAFAFA"))
-				s.WriteString(timerStyle.Render(timerText))
+				minutes = strings.TrimSpace(parts[0])
+				seconds = strings.TrimSpace(parts[1])
+				parsed = true
 			}
+		}
+		
+		// Format 2: "9m30s" or similar
+		if !parsed && strings.Contains(timerText, "m") && strings.Contains(timerText, "s") {
+			// Extract minutes and seconds from format like "9m30s"
+			text := timerText
+			if mIndex := strings.Index(text, "m"); mIndex > 0 {
+				minutes = text[:mIndex]
+				remaining := text[mIndex+1:]
+				if sIndex := strings.Index(remaining, "s"); sIndex > 0 {
+					seconds = remaining[:sIndex]
+					parsed = true
+				}
+			}
+		}
+		
+		if parsed {
+			// Create enhanced timer display with highlighted minutes
+			timerDisplay := minutesStyle.Render(minutes) + "  " + colonStyle.Render(":") + "  " + secondsStyle.Render(seconds)
+			s.WriteString(timerDisplay)
 		} else {
-			// Fallback to regular timer display
+			// Fallback to regular timer display if parsing fails
 			timerStyle := lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("#FAFAFA"))

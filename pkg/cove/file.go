@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-var todoRegex = regexp.MustCompile(`^[\s]*-\s+\[([x\s])\]\s+(.+)$`)
+var todoRegex = regexp.MustCompile(`^[\s]*-\s+\[([x\s*])\]\s+(.+)$`)
 var starRegex = regexp.MustCompile(`\*+`)
+var timeRegex = regexp.MustCompile(`\(took (\d+)m\)`)
 
 func ReadTodos(filename string) ([]Todo, error) {
 	file, err := os.Open(filename)
@@ -30,6 +31,16 @@ func ReadTodos(filename string) ([]Todo, error) {
 			checkbox := strings.TrimSpace(match[1])
 			description := strings.TrimSpace(match[2])
 			
+			// Extract time spent from description like "(took 9m)"
+			var timeSpent time.Duration
+			if timeMatch := timeRegex.FindStringSubmatch(description); timeMatch != nil {
+				if minutes, err := time.ParseDuration(timeMatch[1] + "m"); err == nil {
+					timeSpent = minutes
+				}
+				// Remove time info from description
+				description = strings.TrimSpace(timeRegex.ReplaceAllString(description, ""))
+			}
+			
 			// Check for timer hints (stars)
 			var todo Todo
 			if starMatch := starRegex.FindString(description); starMatch != "" {
@@ -42,9 +53,18 @@ func ReadTodos(filename string) ([]Todo, error) {
 				todo = NewTodo(description)
 			}
 			
-			if checkbox == "x" {
+			// Set state based on checkbox
+			switch checkbox {
+			case "x":
 				todo.State = Done
+			case "*":
+				todo.State = Open // In progress, but still open
+			default:
+				todo.State = Open
 			}
+			
+			// Set time spent
+			todo.TimeSpent = timeSpent
 			
 			todo.OriginalLine = line
 			todo.LineNumber = lineNumber
